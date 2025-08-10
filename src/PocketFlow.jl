@@ -187,4 +187,56 @@ end
 # Optional per-item fallback
 exec_item_fallback(::AbstractBatchNode, ::Any, exc) = throw(exc)
 
+# =======================
+# Batch support (sync)
+# =======================
+export AbstractBatchNode, prep_batch, exec_item, exec_item_fallback, post_batch
+
+"Batch nodes map over an iterable, then reduce once."
+# abstract type AbstractBatchNode <: AbstractNode end
+
+"Return an iterable of items to process."
+prep_batch(::AbstractBatchNode, ::Any) = Any[]
+
+"Compute for ONE item (pure wrt shared)."
+exec_item(::AbstractBatchNode, ::Any, item) = item
+
+"Optional graceful fallback for a single item."
+exec_item_fallback(::AbstractBatchNode, ::Any, exc) = throw(exc)
+
+"Reduce across all item results; return action label or `nothing` (=> default)."
+post_batch(::AbstractBatchNode, ::Any, prep_items, exec_results) = nothing
+
+"Engine path for batch nodes (per-node retries apply per item)."
+function _run_node(n::AbstractBatchNode, shared::SharedStore)
+    items = prep_batch(n, shared)
+    cfg = node_config(n)
+    results = Vector{Any}(undef, length(items))
+
+    # Iterate with indices so we can store results deterministically
+    for (i, item) in enumerate(items)
+        for attempt in 0:cfg.max_retries-1
+            _CUR_RETRY[n] = attempt
+            try
+                results[i] = exec_item(n, item, item)
+                break  # success for this item
+            catch err
+                if attempt < cfg.max_retries - 1
+                    cfg.wait > 0 && sleep(cfg.wait)
+                    continue
+                end
+                # final attempt failed: try item-level fallback
+                try
+                    results[i] = exec_item_fallback(n, item, err)
+                catch _
+                    results[i] = err  # surface the error object to post_batch if desired
+                end
+            end
+        end
+    end
+
+    act = post_batch(n, shared, items, results)
+    return something(act, "default")
+end
+
 end # module

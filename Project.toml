@@ -1,2 +1,11 @@
+name = "PocketFlow"
+uuid = "92e18a99-f15a-49b9-881f-e98371eb49bb"
+authors = ["g "]
+version = "0.1.0"
+
 [deps]
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+Test = "1.11.0"

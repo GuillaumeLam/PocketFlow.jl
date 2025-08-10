@@ -13,7 +13,7 @@ using .PocketFlow
     a = A(); b = B()
     a >> b
     shared = SharedStore()
-    run(Flow(start=a), shared)
+    run!(Flow(start=a), shared)
     @test shared.data["a"] == "x"
     @test shared.data["b"] == 42
 end
@@ -29,7 +29,7 @@ end
     c = C(); d = D()
     (c - "go") >> d
     shared = SharedStore()
-    run(Flow(start=c), shared)
+    run!(Flow(start=c), shared)
     @test shared.data["d"] == 1
 end
 
@@ -42,7 +42,7 @@ end
 
     f = Flaky()
     shared = SharedStore()
-    run(f, shared)
+    run!(f, shared)
     @test shared.data["x"] == 7
 end
 
@@ -61,7 +61,7 @@ end
     # Parent flow uses subflow as a node
     parent_start = sub
     shared = SharedStore()
-    run(Flow(start=parent_start), shared)
+    run!(Flow(start=parent_start), shared)
     @test shared.data["q"] == 2
     @test shared.data["r"] == 3
 end
@@ -80,6 +80,6 @@ end
     m = UpMap(); j = JoinR()
     m >> j
     s = SharedStore()
-    run(Flow(start=m), s)
+    run!(Flow(start=m), s)
     @test s.data["out"] == "A-B"
 end
