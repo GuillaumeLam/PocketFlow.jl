@@ -50,10 +50,8 @@ post(::AbstractNode, ::Any, ::Any, ::Any) = nothing
 
 # ---------------- Transitions / Graph DSL ----------------
 
-"Transitions keyed by node *identity*."
 const _TRANSITIONS = IdDict{AbstractNode, Dict{String,AbstractNode}}()
 
-"Internal: reference used by `node - \"label\" >> next`."
 struct _ActionRef
     node::AbstractNode
     action::String
@@ -62,39 +60,48 @@ end
 (-)(n::AbstractNode, a::String) = _ActionRef(n, a)
 action(n::AbstractNode, a::String) = _ActionRef(n, a)
 
-"Default-edge: a >> b (i.e., label == \"default\")."
 function Base.:>>(a::AbstractNode, b::AbstractNode)
     ft = get!(_TRANSITIONS, a, Dict{String,AbstractNode}())
     ft["default"] = b
     b
 end
 
-"Labeled-edge: (a - \"ok\") >> b."
 function Base.:>>(ar::_ActionRef, b::AbstractNode)
     ft = get!(_TRANSITIONS, ar.node, Dict{String,AbstractNode}())
     ft[ar.action] = b
     b
 end
 
+"Clear all currently wired edges (useful between graph builds/tests)."
+clear_edges!() = (empty!(_TRANSITIONS); nothing)
+
 # ---------------- Flow (also a Node) ----------------
 
-"Flows orchestrate nodes; can also be used as a Node (nesting)."
 mutable struct Flow <: AbstractNode
     start::AbstractNode
+    transitions::IdDict{AbstractNode, Dict{String,AbstractNode}}
     params::Dict{String,Any}
 end
-Flow(; start::AbstractNode) = Flow(start, Dict{String,Any}())
 
-"Optional param bag (semantic sugar for Batch/Async patterns later)."
+"Snapshot the currently wired graph into this Flow and (optionally) clear global edges."
+function Flow(; start::AbstractNode, clear_after::Bool=true)
+    snap = IdDict{AbstractNode, Dict{String,AbstractNode}}()
+    for (k,v) in _TRANSITIONS
+        snap[k] = copy(v)
+    end
+    clear_after && clear_edges!()
+    Flow(start, snap, Dict{String,Any}())
+end
+
 function set_params(f::Flow, p::Dict{String,Any})
     merge!(f.params, p); f
 end
 
 # ---------------- Engine ----------------
 
-"Run a single node with its per-node retry/fallback; return action label."
-function _run_node(n::AbstractNode, shared::SharedStore)
-    # Special case: Flow as Node => run its subgraph as a unit
+# Internal worker for regular (non-batch) nodes
+function _run_node_core(n::AbstractNode, shared::SharedStore)::String
+    # Flow as Node: run its subgraph
     if n isa Flow
         run(n::Flow, shared)
         act = post(n, shared, nothing, nothing)
@@ -115,21 +122,61 @@ function _run_node(n::AbstractNode, shared::SharedStore)
                 cfg.wait > 0 && sleep(cfg.wait)
                 continue
             end
-            # Final fallback (graceful)
             fb = exec_fallback(n, prep_res, err)
             act = post(n, shared, prep_res, fb)
             return something(act, "default")
         end
     end
-    "default"
+    return "default"
 end
 
-"Follow action-labeled edges until no successor exists."
+abstract type AbstractBatchNode <: AbstractNode end
+
+# Internal worker for batch nodes
+function _run_node_batch(n::AbstractBatchNode, shared::SharedStore)::String
+    items = prep_batch(n, shared)
+    cfg = node_config(n)
+    results = Vector{Any}(undef, length(items))
+
+    for (i, item) in enumerate(items)
+        for attempt in 0:cfg.max_retries-1
+            _CUR_RETRY[n] = attempt
+            try
+                results[i] = exec_item(n, item, item)
+                break  # success for this item
+            catch err
+                if attempt < cfg.max_retries - 1
+                    cfg.wait > 0 && sleep(cfg.wait)
+                    continue
+                end
+                try
+                    results[i] = exec_item_fallback(n, item, err)
+                catch _
+                    results[i] = err  # surface to post_batch if desired
+                end
+            end
+        end
+    end
+
+    act = post_batch(n, shared, items, results)
+    return something(act, "default")
+end
+
+"Single public entry: routes to batch or core as needed."
+function _run_node(n::AbstractNode, shared::SharedStore)::String
+    if n isa AbstractBatchNode
+        return _run_node_batch(n::AbstractBatchNode, shared)
+    else
+        return _run_node_core(n, shared)
+    end
+end
+
+"Follow action-labeled edges until no successor exists (Flow-local transitions)."
 function run(f::Flow, shared::SharedStore)
     cur = f.start
     while true
         act = _run_node(cur, shared)
-        nxt = get(get(_TRANSITIONS, cur, Dict{String,AbstractNode}()), act, nothing)
+        nxt = get(get(f.transitions, cur, Dict{String,AbstractNode}()), act, nothing)
         nxt === nothing && break
         cur = nxt
     end
@@ -139,53 +186,9 @@ const run! = run
 
 "Convenience: run a single node (debug)."
 function run(n::AbstractNode, shared::SharedStore)
-    _ = _run_node(n, shared); nothing
+    _ = _run_node(n, shared)
+    nothing
 end
-
-# --- Batch support ---
-abstract type AbstractBatchNode <: AbstractNode end
-
-# Default batch hooks (override in your nodes)
-prep_batch(::AbstractBatchNode, ::Any) = Any[]            # returns iterable (Vector by default)
-exec_item(::AbstractBatchNode, ::Any, item) = item        # compute for one item
-post_batch(::AbstractBatchNode, ::Any, prep_items, exec_results) = nothing  # return action or nothing
-
-# Engine path for batch nodes
-function _run_node(n::AbstractBatchNode, shared::SharedStore)
-    prep_items = prep_batch(n, shared)
-    cfg = node_config(n)
-    results = Vector{Any}(undef, length(prep_items))
-    for (i, item) in pairs(prep_items)
-        last_err = nothing
-        for attempt in 0:cfg.max_retries-1
-            _CUR_RETRY[n] = attempt
-            ok = true
-            try
-                results[i] = exec_item(n, item, item)
-            catch err
-                ok = false
-                if attempt < cfg.max_retries-1
-                    cfg.wait > 0 && sleep(cfg.wait)
-                else
-                    # Give node a chance to recover on an item
-                    try
-                        results[i] = exec_item_fallback(n, item, err)
-                        ok = true
-                    catch _
-                        # store the error; node can inspect later if desired
-                        results[i] = err
-                    end
-                end
-            end
-            ok && break
-        end
-    end
-    act = post_batch(n, shared, prep_items, results)
-    return something(act, "default")
-end
-
-# Optional per-item fallback
-exec_item_fallback(::AbstractBatchNode, ::Any, exc) = throw(exc)
 
 # =======================
 # Batch support (sync)
