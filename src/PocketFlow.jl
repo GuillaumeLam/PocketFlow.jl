@@ -142,4 +142,49 @@ function run(n::AbstractNode, shared::SharedStore)
     _ = _run_node(n, shared); nothing
 end
 
+# --- Batch support ---
+abstract type AbstractBatchNode <: AbstractNode end
+
+# Default batch hooks (override in your nodes)
+prep_batch(::AbstractBatchNode, ::Any) = Any[]            # returns iterable (Vector by default)
+exec_item(::AbstractBatchNode, ::Any, item) = item        # compute for one item
+post_batch(::AbstractBatchNode, ::Any, prep_items, exec_results) = nothing  # return action or nothing
+
+# Engine path for batch nodes
+function _run_node(n::AbstractBatchNode, shared::SharedStore)
+    prep_items = prep_batch(n, shared)
+    cfg = node_config(n)
+    results = Vector{Any}(undef, length(prep_items))
+    for (i, item) in pairs(prep_items)
+        last_err = nothing
+        for attempt in 0:cfg.max_retries-1
+            _CUR_RETRY[n] = attempt
+            ok = true
+            try
+                results[i] = exec_item(n, item, item)
+            catch err
+                ok = false
+                if attempt < cfg.max_retries-1
+                    cfg.wait > 0 && sleep(cfg.wait)
+                else
+                    # Give node a chance to recover on an item
+                    try
+                        results[i] = exec_item_fallback(n, item, err)
+                        ok = true
+                    catch _
+                        # store the error; node can inspect later if desired
+                        results[i] = err
+                    end
+                end
+            end
+            ok && break
+        end
+    end
+    act = post_batch(n, shared, prep_items, results)
+    return something(act, "default")
+end
+
+# Optional per-item fallback
+exec_item_fallback(::AbstractBatchNode, ::Any, exc) = throw(exc)
+
 end # module
