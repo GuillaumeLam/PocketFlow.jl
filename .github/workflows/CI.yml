@@ -1,0 +1,59 @@
+name: CI
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Julia ${{ matrix.version }} • ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['1.10', '1']   # test LTS-ish and latest stable
+        os: [ubuntu-latest]      # add macos-latest, windows-latest if you want
+        arch: [x64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+          arch: ${{ matrix.arch }}
+
+      - name: Cache artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.julia/artifacts
+          key: ${{ runner.os }}-julia-artifacts-${{ hashFiles('**/Project.toml', '**/Manifest.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-julia-artifacts-
+
+      - name: Instantiate
+        run: julia --color=yes -e 'using Pkg; Pkg.instantiate()'
+
+      - name: Run tests
+        run: julia --color=yes -e 'using Pkg; Pkg.test(coverage=true)'
+
+      # === Coverage to Codecov (Option A: Codecov Action) ===
+      - name: Generate lcov.info
+        run: |
+          julia --color=yes -e '
+            using Pkg; Pkg.add("Coverage");
+            using Coverage;
+            LCOV.writefile("lcov.info", process_folder());
+          '
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          verbose: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}  # public repos often work without token; private needs it

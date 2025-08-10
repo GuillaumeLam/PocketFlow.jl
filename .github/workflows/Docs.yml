@@ -1,0 +1,36 @@
+name: Docs
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+
+# Documenter pushes to gh-pages using GITHUB_TOKEN
+permissions:
+  contents: write
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+
+      - name: Cache artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.julia/artifacts
+          key: ${{ runner.os }}-julia-artifacts-${{ hashFiles('**/Project.toml', '**/Manifest.toml', 'docs/**') }}
+          restore-keys: |
+            ${{ runner.os }}-julia-artifacts-
+
+      - name: Instatiate docs environment
+        run: julia --color=yes --project=docs -e 'using Pkg; Pkg.instantiate()'
+
+      - name: Build and deploy docs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # used by Documenter to push to gh-pages
+        run: julia --color=yes --project=docs docs/make.jl
